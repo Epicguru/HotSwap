@@ -16,6 +16,7 @@ namespace HotSwap
     [StaticConstructorOnStartup]
     static class HotSwapMain
     {
+        public static bool EnableAutoReload = true;
         public static int runInFrames;
         public static Dictionary<Assembly, FileInfo> AssemblyFiles;
         public static KeyBindingDef HotSwapKey = KeyBindingDef.Named("HotSwapKey");
@@ -34,6 +35,7 @@ namespace HotSwap
         // A cache used so the methods don't get GC'd
         private static readonly Dictionary<MethodBase, DynamicMethod> dynMethods = new();
         private static readonly Harmony harmony = new("HotSwap");
+        private static readonly Dictionary<string, FileSystemWatcher> dirToWatcher = new();
         private static int count;
         private static readonly DateTime startTime = DateTime.Now;
 
@@ -60,6 +62,25 @@ namespace HotSwap
                     if (found != null && !dict.ContainsKey(found))
                     {
                         dict[found] = fileInfo;
+
+                        // Set up file system watcher, if we don't already have one.
+                        string watchDir = fileInfo.Directory.FullName;
+                        if (!dirToWatcher.ContainsKey(watchDir))
+                        {
+                            var watcher = new FileSystemWatcher(watchDir, "*.dll");
+                            watcher.NotifyFilter = NotifyFilters.Attributes
+                                                 | NotifyFilters.CreationTime
+                                                 | NotifyFilters.LastWrite
+                                                 | NotifyFilters.Size;
+
+                            watcher.Changed += OnDllChange;
+
+                            dirToWatcher.Add(watchDir, watcher);
+                            watcher.IncludeSubdirectories = true;
+                            watcher.EnableRaisingEvents = true;
+                        }
+
+                        // Check for 'HotSwapAll' attribute.
                         foreach (var type in found.GetTypes())
                         {
                             if (type.CustomAttributes.Any(a => HotSwapAllNames.Contains(a.AttributeType.Name.ToLowerInvariant())))
@@ -74,6 +95,20 @@ namespace HotSwap
 
             Info($"HotSwap mapped {dict.Count} assemblies to their .dll files.");
             return dict;
+        }
+
+        private static void OnDllChange(object sender, FileSystemEventArgs e)
+        {
+            if (!EnableAutoReload)
+                return;
+
+            var file = new FileInfo(e.FullPath);
+
+            if (!file.Exists)
+                return;
+
+            bool hotSwapAllMethods = AssembliesToReloadAllMethods.Contains(file.FullName);
+            HotSwap(file, hotSwapAllMethods);
         }
 
         public static void ScheduleHotSwap()
@@ -102,6 +137,7 @@ namespace HotSwap
         public static void HotSwap(FileInfo file, bool allMethods)
         {
             using var dnModule = ModuleDefMD.Load(file.FullName);
+            int methodCount = 0;
 
             foreach (var dnType in dnModule.GetTypes())
             {
@@ -160,6 +196,8 @@ namespace HotSwap
                             Memory.DetourMethod(method, replacement);
 
                             dynMethods[method] = replacement;
+
+                            methodCount++;
                         }
                         catch (Exception e)
                         {
@@ -168,6 +206,9 @@ namespace HotSwap
                     }
                 }
             }
+
+            Info($"Reloaded {methodCount} methods in {dnModule.Name} (from {file.Name}).");
+            Messages.Message($"Reloaded {methodCount} methods in {dnModule.Name} (from {file.Name}).", MessageTypeDefOf.NeutralEvent, false);
         }
 
         static void Info(string str) => Log.Message($"<color=magenta>[HotSwap]</color> {str}");
