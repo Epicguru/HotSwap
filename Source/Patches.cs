@@ -18,7 +18,7 @@ namespace HotSwap
         static void Prefix()
         {
             if (Event.current.type == EventType.Repaint && --HotSwapMain.runInFrames == 0)
-                HotSwapMain.DoHotSwap();
+                HotSwapMain.HotSwapAll();
 
             if (HotSwapMain.HotSwapKey.KeyDownEvent)
             {

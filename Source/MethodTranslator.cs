@@ -20,7 +20,7 @@ namespace HotSwap
             }
         }
 
-        public static void TranslateRefs(CilBody methodBody, byte[] newCode, DynamicMethod replacement, Stopwatch[] watches)
+        public static void TranslateRefs(CilBody methodBody, byte[] newCode, DynamicMethod replacement)
         {
             int pos = 0;
 
@@ -36,16 +36,7 @@ namespace HotSwap
                     case dnlib.DotNet.Emit.OperandType.InlineTok:
                         pos += inst.OpCode.Size;
 
-                        var watch = inst.Operand switch
-                        {
-                            IType => 6,
-                            IMethod => 7,
-                            _ => 8
-                        };
-
-                        watches[watch].Start();
                         object @ref = Translator.TranslateRef(inst.Operand);
-                        watches[watch].Stop();
 
                         if (@ref == null)
                             throw new NullReferenceException($"Null translation {inst.Operand} {inst.Operand.GetType()}");

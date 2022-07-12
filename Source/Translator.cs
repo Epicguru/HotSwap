@@ -1,18 +1,16 @@
+using dnlib.DotNet;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
-using dnlib.DotNet;
-using Verse;
 
 namespace HotSwap
 {
     [HotSwappable]
     static class Translator
     {
-        static BindingFlags all = BindingFlags.Public
+        const BindingFlags ALL = BindingFlags.Public
             | BindingFlags.NonPublic
             | BindingFlags.Instance
             | BindingFlags.Static
@@ -31,7 +29,7 @@ namespace HotSwap
         private static MemberInfo[] GetMembers(Type t)
         {
             if (!memberCache.TryGetValue(t, out var cached))
-                return memberCache[t] = t.GetMembers(all);
+                return memberCache[t] = t.GetMembers(ALL);
             return cached;
         }
 
@@ -56,7 +54,7 @@ namespace HotSwap
             if (member.IsField)
             {
                 Type declType = (Type)TranslateRef(member.DeclaringType);
-                var field = declType.GetField(member.Name, all);
+                var field = declType.GetField(member.Name, ALL);
                 return field;
             }
 

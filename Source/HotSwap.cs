@@ -1,20 +1,13 @@
 using dnlib.DotNet;
-using dnlib.DotNet.Emit;
-using dnlib.DotNet.MD;
-using dnlib.DotNet.Writer;
 using HarmonyLib;
-using MonoMod.RuntimeDetour;
+using RimWorld;
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
-using RimWorld;
-using UnityEngine;
 using Verse;
 
 namespace HotSwap
@@ -23,12 +16,26 @@ namespace HotSwap
     [StaticConstructorOnStartup]
     static class HotSwapMain
     {
+        public static int runInFrames;
         public static Dictionary<Assembly, FileInfo> AssemblyFiles;
-        static Harmony harmony = new("HotSwap");
-
         public static KeyBindingDef HotSwapKey = KeyBindingDef.Named("HotSwapKey");
+        public static HashSet<string> HotSwapNames = new()
+        {
+            "hotswap", "hotswapattribute",
+            "hotswappable", "hotswappableattribute",
+        };
+        public static HashSet<string> HotSwapAllNames = new()
+        {
+            "hotswapall", "hotswapallattribute",
+            "hotswappableall", "hotswappableallattribute",
+        };
+        public static HashSet<string> AssembliesToReloadAllMethods = new();
 
-        static DateTime startTime = DateTime.Now;
+        // A cache used so the methods don't get GC'd
+        private static readonly Dictionary<MethodBase, DynamicMethod> dynMethods = new();
+        private static readonly Harmony harmony = new("HotSwap");
+        private static int count;
+        private static readonly DateTime startTime = DateTime.Now;
 
         static HotSwapMain()
         {
@@ -42,29 +49,32 @@ namespace HotSwap
 
             foreach (var mod in LoadedModManager.RunningMods)
             {
+                // Ignore mods that are not in the /Mods folder.
+                if (new DirectoryInfo(mod.RootDir).Parent.Name != "Mods")
+                    continue;
+
                 foreach (FileInfo fileInfo in ModContentPack.GetAllFilesForModPreserveOrder(mod, "Assemblies/", (string e) => e.ToLower() == ".dll", null).Select(t => t.Item2))
                 {
                     var fileAsmName = AssemblyName.GetAssemblyName(fileInfo.FullName).FullName;
-                    var search = mod.assemblies.loadedAssemblies.Find(a => a.GetName().FullName == fileAsmName);
-                    if (search != null && !dict.ContainsKey(search))
+                    var found = mod.assemblies.loadedAssemblies.Find(a => a.GetName().FullName == fileAsmName);
+                    if (found != null && !dict.ContainsKey(found))
                     {
-                        dict[search] = fileInfo;
-                        Info($"HotSwap mapped {fileInfo} to {search.GetName()}");
+                        dict[found] = fileInfo;
+                        foreach (var type in found.GetTypes())
+                        {
+                            if (type.CustomAttributes.Any(a => HotSwapAllNames.Contains(a.AttributeType.Name.ToLowerInvariant())))
+                            {
+                                AssembliesToReloadAllMethods.Add(fileInfo.FullName);
+                                break;
+                            }
+                        }
                     }
                 }
             }
 
+            Info($"HotSwap mapped {dict.Count} assemblies to their .dll files.");
             return dict;
         }
-
-        // A cache used so the methods don't get GC'd
-        private static Dictionary<MethodBase, DynamicMethod> dynMethods = new();
-        private static int count;
-
-        const string AttrName1 = "HotSwappable";
-        const string AttrName2 = "HotSwappableAttribute";
-
-        public static int runInFrames;
 
         public static void ScheduleHotSwap()
         {
@@ -72,109 +82,96 @@ namespace HotSwap
             Messages.Message("Hotswapping...", MessageTypeDefOf.SilentInput);
         }
 
-        public static void DoHotSwap()
+        public static void HotSwapAll()
         {
             Info("Hotswapping...");
 
-            var watches = new[]
-            {
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-                new Stopwatch(),
-            };
-
-            watches[5].Start();
-
             foreach (var kv in AssemblyFiles)
             {
-                kv.value.Refresh();
+                kv.Value.Refresh();
                 if (kv.Value.LastWriteTime < startTime)
                     continue;
 
-                using var dnModule = ModuleDefMD.Load(kv.Value.FullName);
+                bool hotSwapAllMethods = AssembliesToReloadAllMethods.Contains(kv.Value.FullName);
+                HotSwap(kv.Value, hotSwapAllMethods);
+            }
 
-                foreach (var dnType in dnModule.GetTypes())
+            Info($"Hotswapping done.");
+        }
+
+        public static void HotSwap(FileInfo file, bool allMethods)
+        {
+            using var dnModule = ModuleDefMD.Load(file.FullName);
+
+            foreach (var dnType in dnModule.GetTypes())
+            {
+                if (!allMethods)
                 {
-                    if (!dnType.HasCustomAttributes) continue;
-                    if (!dnType.CustomAttributes.Select(a => a.AttributeType.Name).Any(n => n == AttrName1 || n == AttrName2)) continue;
+                    if (!dnType.HasCustomAttributes)
+                        continue;
 
-                    const BindingFlags allDeclared = BindingFlags.DeclaredOnly | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
+                    if (!dnType.CustomAttributes.Any(a => HotSwapNames.Contains(a.AttributeType.Name.ToLowerInvariant())))
+                        continue;
+                }               
 
-                    var typeWithAttr = Type.GetType(dnType.AssemblyQualifiedName);
-                    var types = typeWithAttr.GetNestedTypes(allDeclared).Where(IsCompilerGenerated).Concat(typeWithAttr);
-                    var typesKv = types.Select(t => new KeyValuePair<Type, TypeDef>(t, dnModule.FindReflection(t.FullName))).Where(t => t.Key != null && t.Value != null);
+                const BindingFlags ALL_DECLARED = BindingFlags.DeclaredOnly | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
 
-                    foreach (var typePair in typesKv)
+                var typeWithAttr = Type.GetType(dnType.AssemblyQualifiedName);
+                var types = typeWithAttr.GetNestedTypes(ALL_DECLARED).Where(IsCompilerGenerated).Concat(typeWithAttr);
+                var typesKv = types.Select(t => new KeyValuePair<Type, TypeDef>(t, dnModule.FindReflection(t.FullName))).Where(t => t.Key != null && t.Value != null);
+
+                foreach (var typePair in typesKv)
+                {
+                    if (typePair.Key.IsGenericTypeDefinition)
+                        continue;
+
+                    foreach (var method in typePair.Key.GetMethods(ALL_DECLARED).Concat(typePair.key.GetConstructors(ALL_DECLARED).Cast<MethodBase>()))
                     {
-                        if (typePair.Key.IsGenericTypeDefinition)
+                        if (method.GetMethodBody() == null)
+                            continue;
+                        if (method.IsGenericMethodDefinition)
                             continue;
 
-                        foreach (var method in typePair.Key.GetMethods(allDeclared).Concat(typePair.key.GetConstructors(allDeclared).Cast<MethodBase>()))
+                        byte[] code = method.GetMethodBody().GetILAsByteArray();
+                        var dnMethod = typePair.Value.Methods.FirstOrDefault(m => Translator.MethodSigMatch(method, m));
+
+                        if (dnMethod == null) continue;
+
+                        var methodBody = dnMethod.Body;
+                        byte[] newCode = MethodSerializer.SerializeInstructions(methodBody);
+
+                        if (ByteArrayCompare(code, newCode))
+                            continue;
+
+                        try
                         {
-                            if (method.GetMethodBody() == null) continue;
-                            if (method.IsGenericMethodDefinition) continue;
+                            var replacement = OldHarmony.CreateDynamicMethod(method, $"_HotSwap{count++}");
+                            var ilGen = replacement.GetILGenerator();
 
-                            watches[0].Start();
-                            byte[] code = method.GetMethodBody().GetILAsByteArray();
-                            var dnMethod = typePair.Value.Methods.FirstOrDefault(m => Translator.MethodSigMatch(method, m));
-                            watches[0].Stop();
+                            MethodTranslator.TranslateLocals(methodBody, ilGen);
+                            MethodTranslator.TranslateRefs(methodBody, newCode, replacement);
 
-                            if (dnMethod == null) continue;
+                            ilGen.code = newCode;
+                            ilGen.code_len = newCode.Length;
+                            ilGen.max_stack = methodBody.MaxStack;
 
-                            watches[1].Start();
-                            var methodBody = dnMethod.Body;
-                            byte[] newCode = MethodSerializer.SerializeInstructions(methodBody);
-                            watches[1].Stop();
+                            MethodTranslator.TranslateExceptions(methodBody, ilGen);
+                            OldHarmony.PrepareDynamicMethod(replacement);
+                            Memory.DetourMethod(method, replacement);
 
-                            if (ByteArrayCompare(code, newCode)) continue;
-
-                            try
-                            {
-                                watches[2].Start();
-                                var replacement = OldHarmony.CreateDynamicMethod(method, $"_HotSwap{count++}");
-                                var ilGen = replacement.GetILGenerator();
-                                watches[2].Stop();
-
-                                watches[3].Start();
-                                MethodTranslator.TranslateLocals(methodBody, ilGen);
-                                MethodTranslator.TranslateRefs(methodBody, newCode, replacement, watches);
-                                watches[3].Stop();
-
-                                ilGen.code = newCode;
-                                ilGen.code_len = newCode.Length;
-                                ilGen.max_stack = methodBody.MaxStack;
-
-                                watches[4].Start();
-                                MethodTranslator.TranslateExceptions(methodBody, ilGen);
-                                OldHarmony.PrepareDynamicMethod(replacement);
-                                Memory.DetourMethod(method, replacement);
-                                watches[4].Stop();
-
-                                dynMethods[method] = replacement;
-                            }
-                            catch (Exception e)
-                            {
-                                Error($"Patching {method.FullDescription()} failed with {e}");
-                            }
+                            dynMethods[method] = replacement;
+                        }
+                        catch (Exception e)
+                        {
+                            Error($"Patching {method.FullDescription()} failed with {e}");
                         }
                     }
                 }
             }
-            watches[5].Stop();
-
-            Info($"Hotswapping done... {watches.Join(w => w.ElapsedMilliseconds.ToString())}");
         }
 
-        // Obsolete signatures, used for cross-version compat
-        static void Info(string str) => Log.Message(str, false);
-        static void Error(string str) => Log.Error(str, false);
+        static void Info(string str) => Log.Message($"<color=magenta>[HotSwap]</color> {str}");
+        static void Error(string str) => Log.Error($"<color=magenta>[HotSwap]</color> {str}");
 
         public static bool IsCompilerGenerated(Type type)
         {
