@@ -16,6 +16,8 @@ namespace HotSwap
     [StaticConstructorOnStartup]
     static class HotSwapMain
     {
+        [TweakValue("HotSwap")]
+        public static bool LogReloadedMethods = false;
         public static bool EnableAutoReload = true;
         public static int runInFrames;
         public static Dictionary<Assembly, FileInfo> AssemblyFiles;
@@ -29,6 +31,10 @@ namespace HotSwap
         {
             "hotswapall", "hotswapallattribute",
             "hotswappableall", "hotswappableallattribute",
+        };
+        public static HashSet<string> IgnoreNames = new()
+        {
+            "ignorehotswap", "ignorehotswapattribute",
         };
         public static HashSet<string> AssembliesToReloadAllMethods = new();
 
@@ -131,7 +137,7 @@ namespace HotSwap
                 HotSwap(kv.Value, hotSwapAllMethods);
             }
 
-            Info($"Hotswapping done.");
+            Info("Hotswapping done.");
         }
 
         public static void HotSwap(FileInfo file, bool allMethods)
@@ -148,7 +154,10 @@ namespace HotSwap
 
                     if (!dnType.CustomAttributes.Any(a => HotSwapNames.Contains(a.AttributeType.Name.ToLowerInvariant())))
                         continue;
-                }               
+                }
+
+                if (dnType.CustomAttributes.Any(a => IgnoreNames.Contains(a.AttributeType.Name.ToLowerInvariant())))
+                    continue;
 
                 const BindingFlags ALL_DECLARED = BindingFlags.DeclaredOnly | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static;
 
@@ -167,6 +176,9 @@ namespace HotSwap
                             continue;
                         if (method.IsGenericMethodDefinition)
                             continue;
+
+                        if (LogReloadedMethods)
+                            Info($"Reloading {dnType.Namespace}.{dnType.Name}.{method.Name}");
 
                         byte[] code = method.GetMethodBody().GetILAsByteArray();
                         var dnMethod = typePair.Value.Methods.FirstOrDefault(m => Translator.MethodSigMatch(method, m));
@@ -208,7 +220,8 @@ namespace HotSwap
             }
 
             Info($"Reloaded {methodCount} methods in {dnModule.Name} (from {file.Name}).");
-            Messages.Message($"Reloaded {methodCount} methods in {dnModule.Name} (from {file.Name}).", MessageTypeDefOf.NeutralEvent, false);
+            if (methodCount > 0)
+                Messages.Message($"Reloaded {methodCount} methods in {dnModule.Name} (from {file.Name}).", MessageTypeDefOf.NeutralEvent, false);
         }
 
         static void Info(string str) => Log.Message($"<color=magenta>[HotSwap]</color> {str}");
