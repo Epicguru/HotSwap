@@ -29,16 +29,18 @@ namespace HotSwap
 
         static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
         {
+            // No clue what this is supposed to do...
+            
             bool found = false;
 
             foreach (CodeInstruction inst in insts)
             {
-                if (!found && inst.opcode == OpCodes.Stloc_1)
-                {
-                    yield return new CodeInstruction(OpCodes.Ldc_I4_1);
-                    yield return new CodeInstruction(OpCodes.Add);
-                    found = true;
-                }
+                //if (!found && inst.opcode == OpCodes.Stloc_1)
+                //{
+                //    yield return new CodeInstruction(OpCodes.Ldc_I4_1);
+                //    yield return new CodeInstruction(OpCodes.Add);
+                //    found = true;
+                //}
 
                 yield return inst;
             }
