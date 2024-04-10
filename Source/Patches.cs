@@ -1,97 +1,37 @@
 using HarmonyLib;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Reflection;
-using System.Reflection.Emit;
-using System.Text;
-using RimWorld;
 using UnityEngine;
 using Verse;
 
-namespace HotSwap
+namespace HotSwap;
+
+[HarmonyPatch(typeof(DebugWindowsOpener), nameof(DebugWindowsOpener.DevToolStarterOnGUI))]
+internal static class AddDebugButtonPatch
 {
-    [HarmonyPatch(typeof(DebugWindowsOpener), nameof(DebugWindowsOpener.DevToolStarterOnGUI))]
-    static class AddDebugButtonPatch
+    private static void Prefix()
     {
-        static void Prefix()
+        if (Event.current.type == EventType.Repaint && --HotSwapMain.runInFrames == 0)
+            HotSwapMain.HotSwapAll();
+
+        if (HotSwapMain.HotSwapKey.KeyDownEvent)
         {
-            if (Event.current.type == EventType.Repaint && --HotSwapMain.runInFrames == 0)
-                HotSwapMain.HotSwapAll();
-
-            if (HotSwapMain.HotSwapKey.KeyDownEvent)
-            {
-                HotSwapMain.ScheduleHotSwap();
-                Event.current.Use();
-            }
-        }
-
-        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
-        {
-            // No clue what this is supposed to do...
-            
-            bool found = false;
-
-            foreach (CodeInstruction inst in insts)
-            {
-                //if (!found && inst.opcode == OpCodes.Stloc_1)
-                //{
-                //    yield return new CodeInstruction(OpCodes.Ldc_I4_1);
-                //    yield return new CodeInstruction(OpCodes.Add);
-                //    found = true;
-                //}
-
-                yield return inst;
-            }
+            HotSwapMain.ScheduleHotSwap();
+            Event.current.Use();
         }
     }
+}
 
-    [HarmonyPatch(typeof(DebugWindowsOpener), nameof(DebugWindowsOpener.DrawButtons))]
-    static class DebugButtonsPatch
+[HarmonyPatch(typeof(DebugWindowsOpener), nameof(DebugWindowsOpener.DrawButtons))]
+internal static class DebugButtonsPatch
+{
+    private static void Draw(WidgetRow row)
     {
-        public static string Tooltip = "Hot swap.";
-
-        static FieldInfo WidgetRow = AccessTools.Field(typeof(DebugWindowsOpener), nameof(DebugWindowsOpener.widgetRow));
-        static MethodInfo DrawMethod = AccessTools.Method(typeof(DebugButtonsPatch), nameof(Draw));
-
-        static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> insts)
-        {
-            var list = new List<CodeInstruction>(insts);
-
-            var labels = list.Last().labels;
-            list.RemoveLast();
-
-            list.Add(new CodeInstruction(OpCodes.Ldarg_0) { labels = labels });
-            list.Add(new CodeInstruction(OpCodes.Ldfld, WidgetRow));
-            list.Add(new CodeInstruction(OpCodes.Call, DrawMethod));
-            list.Add(new CodeInstruction(OpCodes.Ret));
-
-            return list;
-        }
-
-        static void Draw(WidgetRow row)
-        {
-            if (WidgetRow_ButtonIcon(row, TexButton.Paste, Tooltip))
-                HotSwapMain.ScheduleHotSwap();
-        }
-
-        // WidgetRow.ButtonIcon as a custom method for cross-version compatibility
-        static bool WidgetRow_ButtonIcon(WidgetRow row, Texture2D tex, string tooltip)
-        {
-            const float width = 24f;
-            row.IncrementYIfWillExceedMaxWidth(width);
-
-            var rect = new Rect(row.LeftX(width), row.curY, width, width);
-            var result = Widgets.ButtonImage(rect, tex, Color.white, GenUI.MouseoverColor, true);
-
-            row.IncrementPosition(width);
-
-            if (!tooltip.NullOrEmpty())
-                TooltipHandler.TipRegion(rect, tooltip);
-
-            return result;
-        }
+        if (row.ButtonIcon(TexButton.Paste, $"Hot swap [{HotSwapMain.HotSwapKey.MainKeyLabel}]"))
+            HotSwapMain.ScheduleHotSwap();
     }
 
+    private static void Postfix(DebugWindowsOpener __instance)
+    {
+        Draw(__instance.widgetRow);
+        __instance.widgetRowFinalX = __instance.widgetRow.FinalX;
+    }        
 }

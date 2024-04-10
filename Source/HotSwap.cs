@@ -1,14 +1,14 @@
 using dnlib.DotNet;
 using HarmonyLib;
+using LudeonTK;
+using MonoMod.Core;
 using RimWorld;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
-using LudeonTK;
 using Verse;
 
 namespace HotSwap
@@ -40,7 +40,7 @@ namespace HotSwap
         public static HashSet<string> AssembliesToReloadAllMethods = new();
 
         // A cache used so the methods don't get GC'd
-        private static readonly Dictionary<MethodBase, DynamicMethod> dynMethods = new();
+        private static readonly Dictionary<MethodBase, ICoreDetour> dynMethods = new();
         private static readonly Harmony harmony = new("HotSwap");
         private static readonly Dictionary<string, FileSystemWatcher> dirToWatcher = new();
         private static int count;
@@ -66,37 +66,35 @@ namespace HotSwap
                 {
                     var fileAsmName = AssemblyName.GetAssemblyName(fileInfo.FullName).FullName;
                     var found = mod.assemblies.loadedAssemblies.Find(a => a.GetName().FullName == fileAsmName);
-                    if (found != null && !dict.ContainsKey(found))
+                    if (found == null || !dict.TryAdd(found, fileInfo))
+                        continue;
+                    
+                    // Set up file system watcher, if we don't already have one.
+                    string watchDir = fileInfo.Directory.FullName;
+                    if (!dirToWatcher.ContainsKey(watchDir))
                     {
-                        dict[found] = fileInfo;
+                        var watcher = new FileSystemWatcher(watchDir, "*.dll");
+                        watcher.NotifyFilter = NotifyFilters.Attributes
+                                                | NotifyFilters.CreationTime
+                                                | NotifyFilters.LastWrite
+                                                | NotifyFilters.Size;
 
-                        // Set up file system watcher, if we don't already have one.
-                        string watchDir = fileInfo.Directory.FullName;
-                        if (!dirToWatcher.ContainsKey(watchDir))
-                        {
-                            var watcher = new FileSystemWatcher(watchDir, "*.dll");
-                            watcher.NotifyFilter = NotifyFilters.Attributes
-                                                 | NotifyFilters.CreationTime
-                                                 | NotifyFilters.LastWrite
-                                                 | NotifyFilters.Size;
+                        watcher.Changed += OnDllChange;
 
-                            watcher.Changed += OnDllChange;
-
-                            dirToWatcher.Add(watchDir, watcher);
-                            watcher.IncludeSubdirectories = true;
-                            watcher.EnableRaisingEvents = true;
-                        }
-
-                        // Check for 'HotSwapAll' attribute.
-                        foreach (var type in found.GetTypes())
-                        {
-                            if (type.CustomAttributes.Any(a => HotSwapAllNames.Contains(a.AttributeType.Name.ToLowerInvariant())))
-                            {
-                                AssembliesToReloadAllMethods.Add(fileInfo.FullName);
-                                break;
-                            }
-                        }
+                        dirToWatcher.Add(watchDir, watcher);
+                        watcher.IncludeSubdirectories = true;
+                        watcher.EnableRaisingEvents = true;
                     }
+
+                    // Check for 'HotSwapAll' attribute.
+                    foreach (var type in found.GetTypes())
+                    {
+                        if (type.CustomAttributes.Any(a => HotSwapAllNames.Contains(a.AttributeType.Name.ToLowerInvariant())))
+                        {
+                            AssembliesToReloadAllMethods.Add(fileInfo.FullName);
+                            break;
+                        }
+                    }                    
                 }
             }
 
@@ -189,7 +187,7 @@ namespace HotSwap
                         var methodBody = dnMethod.Body;
                         byte[] newCode = MethodSerializer.SerializeInstructions(methodBody);
 
-                        if (ByteArrayCompare(code, newCode))
+                        if (code.AsReadOnlySpan().SequenceEqual(newCode))
                             continue;
 
                         try
@@ -205,10 +203,10 @@ namespace HotSwap
                             ilGen.max_stack = methodBody.MaxStack;
 
                             MethodTranslator.TranslateExceptions(methodBody, ilGen);
-                            OldHarmony.PrepareDynamicMethod(replacement);
-                            Memory.DetourMethod(method, replacement);
 
-                            dynMethods[method] = replacement;
+                            OldHarmony.PrepareDynamicMethod(replacement);
+
+                            DetourMethod(method, replacement);
 
                             methodCount++;
                         }
@@ -225,6 +223,14 @@ namespace HotSwap
                 Messages.Message($"Reloaded {methodCount} methods in {dnModule.Name} (from {file.Name}).", MessageTypeDefOf.NeutralEvent, false);
         }
 
+        internal static void DetourMethod(MethodBase method, MethodBase replacement)
+        {
+            if (dynMethods.TryGetValue(method, out var detour))
+                detour.Dispose();
+
+            dynMethods[method] = DetourFactory.Current.CreateDetour(method, replacement);            
+        }
+
         static void Info(string str) => Log.Message($"<color=magenta>[HotSwap]</color> {str}");
         static void Error(string str) => Log.Error($"<color=magenta>[HotSwap]</color> {str}");
 
@@ -238,16 +244,10 @@ namespace HotSwap
 
             return false;
         }
-
-        static bool ByteArrayCompare(ReadOnlySpan<byte> a1, ReadOnlySpan<byte> a2)
-        {
-            return a1.SequenceEqual(a2);
-        }
     }
 
     [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct)]
     public class HotSwappableAttribute : Attribute
     {
     }
-
 }
